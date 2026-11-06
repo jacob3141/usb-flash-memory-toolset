@@ -6,8 +6,12 @@ Notable changes are documented here. The format follows
 
 ## Unreleased
 
+## 0.1.0 - 2026-11-06
+
 ### Added
 
+- Windows installer, with optional desktop shortcut and PATH entry.
+- Logo and application icon.
 - Modern interface: light and dark mode following the system, icons, device cards, a partition map
   and a speed chart.
 - `demo` build feature with made-up devices, for interface work and screenshots.

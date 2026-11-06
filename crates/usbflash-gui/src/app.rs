@@ -104,6 +104,7 @@ fn device_icon(d: &DeviceInfo) -> &'static str {
 }
 
 pub struct App {
+    logo: egui::TextureHandle,
     monitor: Receiver<Result<Vec<DeviceInfo>, String>>,
     devices: Vec<DeviceInfo>,
     monitor_error: Option<String>,
@@ -137,6 +138,7 @@ impl App {
         let monitor = jobs::start_monitor(ctx.clone());
         #[allow(unused_mut)]
         let mut app = Self {
+            logo: load_logo(ctx),
             monitor,
             devices: vec![],
             monitor_error: None,
@@ -359,7 +361,7 @@ impl App {
         let p = palette(ui);
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            w::icon_tile(ui, icon::USB, 34.0, p.accent);
+            ui.image((self.logo.id(), Vec2::splat(34.0)));
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 ui.label(strong("USB Flash").size(15.0));
@@ -1178,4 +1180,12 @@ impl eframe::App for App {
 
 fn modal_frame(ctx: &egui::Context) -> egui::Frame {
     egui::Frame::window(&ctx.global_style()).inner_margin(22)
+}
+
+fn load_logo(ctx: &egui::Context) -> egui::TextureHandle {
+    let image = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/logo-128.png"))
+        .expect("the embedded logo is a valid PNG");
+    let size = [image.width as usize, image.height as usize];
+    let pixels = egui::ColorImage::from_rgba_unmultiplied(size, &image.rgba);
+    ctx.load_texture("logo", pixels, egui::TextureOptions::LINEAR)
 }

@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo-128.png" alt="" width="96"></p>
+
 # USB Flash Memory Toolset
 
 Free software to deal with that bucket of old USB sticks: find out what is on them, how
@@ -35,9 +37,10 @@ SquashFS, CramFS, ISO 9660, UDF, LUKS1/2, BitLocker, LVM2, Linux RAID, Linux swa
 
 ## Installation
 
-**Windows:** download the ZIP from the [releases page][releases], unpack it, and start
-`usbflash-gui.exe`. It asks for administrator rights, because raw disk access requires them.
-The builds are not code signed yet, so SmartScreen may warn you the first time.
+**Windows:** download the installer (`...-setup.exe`) from the [releases page][releases] and run it.
+A portable ZIP is available there too. The program asks for administrator rights, because raw disk
+access requires them. The builds are not code signed yet, so SmartScreen may warn you the first time
+("More info", then "Run anyway").
 
 **Linux:** use your distribution's package if there is one, or
 [build from source](docs/DEVELOPMENT.md). Run it as root or as a member of the `disk` group.

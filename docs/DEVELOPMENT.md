@@ -111,6 +111,11 @@ Before a release, on Windows and with a stick without valuable data:
 7. Pull the stick during a wipe. The result is an error or `incomplete`, never success.
 8. GUI: plug and unplug while it is running; run two sticks at once; cancel a job.
 
+## Logo
+
+`assets/logo.svg` is the source. The PNGs, `assets/icon.ico` and the installer images in `assets/installer`
+are rendered from it.
+
 ## Code conventions
 
 - `cargo fmt`, and `cargo clippy --workspace --all-targets -- -D warnings`. CI enforces both.

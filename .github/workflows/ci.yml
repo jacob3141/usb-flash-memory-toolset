@@ -55,6 +55,31 @@ jobs:
       - run: cargo build --release --locked -p usbflash-cli
       - run: scripts/fsck-check.sh target/release/usbflash
 
+  # Builds the real installer, and installs and uninstalls it on the runner.
+  installer:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+      - run: rustup update stable
+      - run: cargo build --workspace --release --locked
+      - run: cargo install cargo-about --locked --features cli
+      - run: cargo about generate --output-file THIRD_PARTY_LICENSES.html about.hbs
+      - run: choco install innosetup --no-progress -y
+      - name: Build and test the installer
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq usbflash-cli).version
+          $setup = scripts/build-installer.ps1 -Version $version | Select-Object -Last 1
+          scripts/test-installer.ps1 -Setup $setup -Version $version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-installer
+          path: target/installer/*.exe
+          retention-days: 7
+
   licenses:
     runs-on: ubuntu-latest
     steps:
