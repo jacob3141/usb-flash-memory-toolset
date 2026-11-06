@@ -32,12 +32,13 @@ fn unescape_mount(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'\\' && i + 3 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 4], 8) {
-                out.push(v);
-                i += 4;
-                continue;
-            }
+        if b[i] == b'\\'
+            && i + 3 < b.len()
+            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 4], 8)
+        {
+            out.push(v);
+            i += 4;
+            continue;
         }
         out.push(b[i]);
         i += 1;
@@ -66,10 +67,10 @@ fn base_disks(name: &str, out: &mut HashSet<String>, depth: u32) {
     }
     let class = PathBuf::from("/sys/class/block").join(name);
     if class.join("partition").exists() {
-        if let Ok(real) = fs::canonicalize(&class) {
-            if let Some(parent) = real.parent().and_then(|p| p.file_name()) {
-                base_disks(&parent.to_string_lossy(), out, depth + 1);
-            }
+        if let Ok(real) = fs::canonicalize(&class)
+            && let Some(parent) = real.parent().and_then(|p| p.file_name())
+        {
+            base_disks(&parent.to_string_lossy(), out, depth + 1);
         }
         return;
     }
@@ -100,10 +101,10 @@ fn protected_disks(mount_list: &[(String, String)]) -> HashSet<String> {
     let exe = std::env::current_exe().ok();
     for (source, mp) in mount_list {
         let holds_exe = exe.as_ref().is_some_and(|e| mp != "/" && e.starts_with(mp));
-        if SYSTEM_MOUNTS.contains(&mp.as_str()) || holds_exe {
-            if let Some(n) = device_basename(source) {
-                base_disks(&n, &mut out, 0);
-            }
+        if (SYSTEM_MOUNTS.contains(&mp.as_str()) || holds_exe)
+            && let Some(n) = device_basename(source)
+        {
+            base_disks(&n, &mut out, 0);
         }
     }
     let swaps = fs::read_to_string("/proc/swaps").unwrap_or_default();

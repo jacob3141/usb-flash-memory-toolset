@@ -8,6 +8,9 @@ Notable changes are documented here. The format follows
 
 ### Added
 
+- Modern interface: light and dark mode following the system, icons, device cards, a partition map
+  and a speed chart.
+- `demo` build feature with made-up devices, for interface work and screenshots.
 - Device discovery on Windows and Linux with protection of system and internal disks.
 - Analysis: MBR, GPT and Apple partition maps, about 30 filesystems and containers, content sampling.
 - Health check: surface read test, speed profile, SMART over SAT, and a verdict.

@@ -19,6 +19,9 @@ cargo build --release --locked -p usbflash-cli
 Build dependencies of the GUI: X11 and/or Wayland, xkbcommon, and OpenGL headers. File dialogs use
 the XDG desktop portal at runtime (`xdg-desktop-portal` with a backend), so GTK is not needed.
 
+The GUI uses Noto Sans if it is installed, and otherwise an embedded font. A dependency on your Noto
+Sans package gives a better result, but is optional.
+
 ## Files to install
 
 | File | Destination |

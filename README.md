@@ -50,10 +50,19 @@ see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Graphical interface
 
-Plug in a stick and select it. The analysis runs automatically. **Factory reset** is one
-button away, and the confirmation shows exactly which device will be erased.
+![Overview of a stick in dark mode](docs/images/overview-dark.png)
 
-A stick that turns out to be interesting can be saved under **Image** first.
+Plug in a stick and select it. The analysis runs automatically. **Factory reset** is one
+button away, and the confirmation shows exactly which device will be erased. A stick that
+turns out to be interesting can be saved under **Backup** first.
+
+The interface follows the light or dark mode of your system.
+
+| Light mode | Health check |
+|---|---|
+| ![Overview in light mode](docs/images/overview-light.png) | ![Health check](docs/images/health.png) |
+
+Screenshots show made-up devices from the demo build.
 
 ## Command line
 

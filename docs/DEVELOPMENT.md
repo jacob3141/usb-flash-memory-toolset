@@ -36,6 +36,23 @@ Release builds, with a statically linked C runtime on Windows:
 cargo build --workspace --release
 ```
 
+## Working on the interface
+
+The `demo` feature shows made-up devices and simulated jobs. That build lists no real disks and
+never calls a device operation, so it is safe to use, and needs no hardware:
+
+```bash
+cargo run -p usbflash-gui --features demo -- --tab health --theme light
+```
+
+`--tab` is `overview`, `health`, `erase` or `image`. `--theme` is `light` or `dark`. `--device` selects
+the n-th made-up device, and `--scene` is one of `running`, `result`, `failed`, `dialog`, `dialog-typed`,
+`empty` or `fresh`. On Windows, start the binary with `__COMPAT_LAYER=RunAsInvoker` set to skip the
+elevation prompt.
+
+The screenshots in `docs/images` come from this build. Do not use real devices for them, since names
+and serial numbers would end up in the repository.
+
 ## Working safely
 
 You do not need a real stick for most work, and you should not use your disks for experiments:

@@ -7,12 +7,14 @@
 mod app;
 mod jobs;
 mod summary;
+mod theme;
+mod widgets;
 
 fn main() -> eframe::Result {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("USB Flash Memory Toolset")
-        .with_inner_size([1040.0, 700.0])
-        .with_min_inner_size([760.0, 520.0]);
+        .with_inner_size([1100.0, 740.0])
+        .with_min_inner_size([860.0, 560.0]);
     if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")) {
         viewport = viewport.with_icon(icon);
     }

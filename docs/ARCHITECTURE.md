@@ -106,7 +106,11 @@ them. When in doubt about the system disk, return an error instead of a guess.
 
 ## GUI
 
-`app.rs` is immediate mode: the whole interface is redrawn from state. `jobs.rs` holds the device
+`app.rs` is immediate mode: the whole interface is redrawn from state. `theme.rs` holds colors for
+light and dark mode, typography and global styling, and `widgets.rs` the reusable building blocks.
+The `demo` feature (`demo.rs`) replaces all device access with made-up data at compile time.
+Icons come from the Phosphor font. Text uses the system font, Segoe UI or Noto Sans, and falls
+back to egui's embedded font. `jobs.rs` holds the device
 monitor thread (polls every 2 seconds and reports changes) and one thread per running operation,
 keyed by device, so several sticks can be processed at once. Results come back over channels;
 `summary.rs` turns reports into short texts.
