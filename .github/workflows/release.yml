@@ -42,6 +42,17 @@ jobs:
           cargo install cargo-about --locked --features cli
           cargo about generate --output-file THIRD_PARTY_LICENSES.html about.hbs
 
+      - name: Build and test the installer
+        run: |
+          choco install innosetup --no-progress -y
+          $setup = scripts/build-installer.ps1 -Version $env:VERSION | Select-Object -Last 1
+          scripts/test-installer.ps1 -Setup $setup -Version $env:VERSION
+          Copy-Item $setup .
+          $name = Split-Path $setup -Leaf
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "$name.sha256"
+          "INSTALLER=$name" >> $env:GITHUB_ENV
+
       - name: Package
         run: |
           $name = "usbflash-toolset-$env:VERSION-windows-x64"
@@ -58,5 +69,7 @@ jobs:
           draft: true
           generate_release_notes: true
           files: |
+            ${{ env.INSTALLER }}
+            ${{ env.INSTALLER }}.sha256
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256

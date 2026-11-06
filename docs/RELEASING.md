@@ -20,13 +20,19 @@ Windows binaries are built by GitHub Actions. Linux is left to distribution main
    ```
 
 6. The `Release` workflow checks that the tag matches the crate version, runs the tests, and builds
-   the ZIP. It then creates a **draft** release with the ZIP and its SHA-256 sum.
-7. Download the ZIP from the draft, and try it on a real stick.
+   the installer and the ZIP. It then creates a **draft** release with both and their SHA-256 sums.
+7. Download the installer from the draft, install it, and try it on a real stick.
 8. Publish the draft.
 
-## What is in the ZIP
+## What is released
 
-`usbflash-toolset-<version>-windows-x64.zip`:
+`usbflash-toolset-<version>-windows-x64-setup.exe` is the installer, built with Inno Setup from
+`packaging/windows/usbflash-toolset.iss`. CI builds it for each pull request, installs it, installs
+over it, uninstalls it and checks the result (`scripts/test-installer.ps1`). Build one locally with
+`scripts/build-installer.ps1 -Version <version>`, after installing Inno Setup. Do not run the test script
+on your own machine, as it changes the system PATH.
+
+`usbflash-toolset-<version>-windows-x64.zip` is the portable version. Both contain:
 
 - `usbflash-gui.exe`, `usbflash.exe`
 - `LICENSE`, `README.md`, `SAFETY.md`
@@ -39,4 +45,4 @@ The GPL's source requirement is met by the source archives that GitHub attaches 
 
 The builds are unsigned, so SmartScreen warns on first start. To sign them later, for example
 through [SignPath](https://signpath.org), which is free for open source projects, add a signing
-step in `release.yml` between building and packaging.
+step in `release.yml` between building and packaging. Sign the installer as well as the programs in it.
