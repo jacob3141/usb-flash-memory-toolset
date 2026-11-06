@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=USB Flash Memory Toolset
+Comment=Analyze, test, wipe and reset USB flash drives
+Exec=pkexec usbflash-gui
+Icon=usb-flash-memory-toolset
+Terminal=false
+Categories=System;Utility;Filesystem;
+Keywords=usb;flash;stick;wipe;format;erase;

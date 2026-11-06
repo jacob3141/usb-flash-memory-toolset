@@ -1,0 +1,7 @@
+/target/
+*.img
+*.iso
+*.vhd
+.vscode/
+.idea/
+*.pdb

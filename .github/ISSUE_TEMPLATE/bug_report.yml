@@ -1,0 +1,41 @@
+name: Bug report
+description: Something does not work, or a stick behaves strangely
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the tool modified a device it should have refused, please report this
+        privately instead. See SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `usbflash --version`
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: Windows 11 24H2 / Fedora 43
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: list
+    attributes:
+      label: Output of `usbflash list --all`
+      description: Remove serial numbers if you wish.
+      render: text
+  - type: textarea
+    id: report
+    attributes:
+      label: JSON report of the failing operation
+      description: Run the command with `--json`, or use "Save report" in the GUI.
+      render: json

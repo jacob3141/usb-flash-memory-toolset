@@ -1,0 +1,62 @@
+name: Release
+
+# Builds the Windows binaries for a version tag and creates a draft release.
+# Linux is left to distribution maintainers; see docs/PACKAGING.md.
+
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+
+      - run: rustup update stable
+
+      - name: Check that the tag matches the crate version
+        run: |
+          $meta = cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'usbflash-cli').version
+          if ("v$version" -ne "$env:GITHUB_REF_NAME") {
+            throw "Tag $env:GITHUB_REF_NAME does not match crate version $version"
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - run: cargo test --workspace --locked
+
+      - run: cargo build --workspace --release --locked
+
+      - name: Generate third party license list
+        run: |
+          cargo install cargo-about --locked --features cli
+          cargo about generate --output-file THIRD_PARTY_LICENSES.html about.hbs
+
+      - name: Package
+        run: |
+          $name = "usbflash-toolset-$env:VERSION-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/usbflash-gui.exe, target/release/usbflash.exe, LICENSE, README.md, docs/SAFETY.md, THIRD_PARTY_LICENSES.html $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+          "ARCHIVE=$name.zip" >> $env:GITHUB_ENV
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          generate_release_notes: true
+          files: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256

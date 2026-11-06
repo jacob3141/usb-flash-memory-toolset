@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.jacob3141.usb_flash_memory_toolset</id>
+  <name>USB Flash Memory Toolset</name>
+  <summary>Analyze, test, wipe and reset USB flash drives</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <developer id="io.github.jacob3141">
+    <name>Jacob Dawid</name>
+  </developer>
+  <description>
+    <p>
+      Find out what is on old USB sticks and how healthy they are, wipe them for privacy,
+      and return them to a clean factory state with one click.
+    </p>
+    <ul>
+      <li>Recognizes about 30 filesystems and encrypted containers</li>
+      <li>Health check and detection of counterfeit capacity</li>
+      <li>Verified wiping with honest failure reports</li>
+      <li>Factory reset with FAT32 or exFAT</li>
+      <li>Backup to an image file, tolerating read errors</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">usb-flash-memory-toolset.desktop</launchable>
+  <url type="homepage">https://github.com/jacob3141/usb-flash-memory-toolset</url>
+  <url type="bugtracker">https://github.com/jacob3141/usb-flash-memory-toolset/issues</url>
+  <content_rating type="oars-1.1"/>
+</component>
