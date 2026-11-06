@@ -205,10 +205,11 @@ mod tests {
 
     #[test]
     fn destination_on_the_device_is_detected() {
-        let dir = std::env::temp_dir();
-        let mount = dir.to_string_lossy().to_string();
+        // Canonical, as mount points are: temp paths can contain 8.3 short names or symlinks.
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        let mount = dir.to_string_lossy().replace("\\\\?\\", "");
         let d = fake_device(&mount);
-        assert!(path_is_on_device(&dir.join("x.img"), &d) || cfg!(target_os = "macos"));
+        assert!(path_is_on_device(&dir.join("x.img"), &d));
         let other = fake_device("/definitely/not/mounted");
         assert!(!path_is_on_device(&dir.join("x.img"), &other));
     }

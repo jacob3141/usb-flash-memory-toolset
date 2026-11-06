@@ -51,14 +51,28 @@ impl BlockDevice for MemDevice {
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.check(offset, buf.len(), buf.as_ptr())?;
         let real = self.data.len() as u64;
-        for (i, b) in buf.iter_mut().enumerate() {
-            *b = self.data[((offset + i as u64) % real) as usize];
+        let mut at = offset;
+        for part in chunks_until_wrap(buf.len(), offset, real) {
+            let start = (at % real) as usize;
+            let done = (at - offset) as usize;
+            buf[done..done + part].copy_from_slice(&self.data[start..start + part]);
+            at += part as u64;
         }
         Ok(())
     }
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
         self.check(offset, buf.len(), buf.as_ptr())?;
         let real = self.data.len() as u64;
+        if self.dropped_writes.is_empty() {
+            let mut at = offset;
+            for part in chunks_until_wrap(buf.len(), offset, real) {
+                let start = (at % real) as usize;
+                let done = (at - offset) as usize;
+                self.data[start..start + part].copy_from_slice(&buf[done..done + part]);
+                at += part as u64;
+            }
+            return Ok(());
+        }
         for (i, b) in buf.iter().enumerate() {
             let at = offset + i as u64;
             if self.dropped_writes.iter().any(|&(s, e)| at >= s && at < e) {
@@ -71,4 +85,17 @@ impl BlockDevice for MemDevice {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Splits an access into the lengths of its pieces between wrap-arounds of the real flash.
+fn chunks_until_wrap(len: usize, offset: u64, real: u64) -> Vec<usize> {
+    let mut parts = vec![];
+    let (mut left, mut at) = (len as u64, offset);
+    while left > 0 {
+        let part = left.min(real - at % real);
+        parts.push(part as usize);
+        left -= part;
+        at += part;
+    }
+    parts
 }
