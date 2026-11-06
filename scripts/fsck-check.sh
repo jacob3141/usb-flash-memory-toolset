@@ -39,9 +39,9 @@ reset() { # size_mib fs table sector_size label
     "$BIN" --image --sector-size "$4" --json reset "$IMG" --quick --fs "$2" --table "$3" --label "$5" --yes >/dev/null
 }
 
-extract_partition() { # sector_size
+extract_partition() { # sector_size of the image; sfdisk assumes 512 for files
     local start count
-    read -r start count < <(sfdisk --sector-size "$1" -l -o Start,Sectors "$IMG" | tail -1)
+    read -r start count < <(sfdisk -l -o Start,Sectors "$IMG" | tail -1)
     rm -f "$PART"
     dd if="$IMG" of="$PART" bs="$1" skip="$start" count="$count" conv=sparse status=none
 }
