@@ -3,28 +3,28 @@
 
 use crate::jobs::{self, Job, Outcome};
 use crate::summary::{self, Summary, Tone};
-use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Vec2};
+use crate::theme::{self, Palette, palette};
+use crate::widgets::{self as w, strong};
+use eframe::egui::{self, Align, Color32, CornerRadius, Layout, Margin, RichText, ThemePreference, Vec2};
+use egui_phosphor::regular as icon;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use usbflash_core::analyze::{Analysis, ContentKind};
 use usbflash_core::format::FsChoice;
 use usbflash_core::guard::{self, Confirmation};
-use usbflash_core::health::HealthReport;
+use usbflash_core::health::{HealthReport, Verdict};
 use usbflash_core::report::{Report, VERSION};
 use usbflash_core::reset::{EraseChoice, ResetOptions, TableChoice};
 use usbflash_core::scan::ScanMode;
+use usbflash_core::smart::SmartOutcome;
 use usbflash_core::units::{bytes, duration, speed};
 use usbflash_core::wipe::WipeMode;
 use usbflash_core::{DeviceInfo, Error, Overrides, Target, ops};
 
-const GOOD: Color32 = Color32::from_rgb(76, 175, 110);
-const WARN: Color32 = Color32::from_rgb(224, 164, 60);
-const BAD: Color32 = Color32::from_rgb(222, 84, 84);
-const ACCENT: Color32 = Color32::from_rgb(90, 150, 230);
-const CARD: Color32 = Color32::from_rgb(40, 43, 50);
-const CARD_ACTIVE: Color32 = Color32::from_rgb(48, 62, 84);
-const MUTED: Color32 = Color32::from_rgb(150, 155, 165);
+#[cfg(feature = "demo")]
+#[path = "demo.rs"]
+mod demo;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -43,12 +43,21 @@ enum Action {
 }
 
 impl Action {
+    fn title(&self) -> &'static str {
+        match self {
+            Action::Reset => "Factory reset",
+            Action::Wipe => "Wipe",
+            Action::CapacityTest => "Capacity test",
+            Action::Restore(_) => "Restore",
+        }
+    }
+
     fn description(&self) -> String {
         match self {
-            Action::Reset => "Restore the factory state".to_string(),
-            Action::Wipe => "Overwrite the entire device".to_string(),
-            Action::CapacityTest => "Run the destructive capacity test".to_string(),
-            Action::Restore(p) => format!("Write the image {}", p.display()),
+            Action::Reset => "Restore the factory state?".to_string(),
+            Action::Wipe => "Overwrite the entire device?".to_string(),
+            Action::CapacityTest => "Run the destructive capacity test?".to_string(),
+            Action::Restore(p) => format!("Write {} to this device?", p.display()),
         }
     }
 }
@@ -74,12 +83,24 @@ fn key(d: &DeviceInfo) -> String {
     format!("{}|{}|{}|{}", d.path, d.model, d.serial, d.size_bytes)
 }
 
-fn tone_color(t: Tone) -> Color32 {
+fn tone_color(p: Palette, t: Tone) -> Color32 {
     match t {
-        Tone::Good => GOOD,
-        Tone::Warning => WARN,
-        Tone::Bad => BAD,
+        Tone::Good => p.good,
+        Tone::Warning => p.warn,
+        Tone::Bad => p.bad,
     }
+}
+
+fn tone_icon(t: Tone) -> &'static str {
+    match t {
+        Tone::Good => icon::CHECK_CIRCLE,
+        Tone::Warning => icon::WARNING,
+        Tone::Bad => icon::WARNING_CIRCLE,
+    }
+}
+
+fn device_icon(d: &DeviceInfo) -> &'static str {
+    if d.is_system || !d.bus.is_flash_bus() { icon::HARD_DRIVE } else { icon::USB }
 }
 
 pub struct App {
@@ -93,7 +114,9 @@ pub struct App {
     jobs: HashMap<String, Job>,
     pending: Option<Pending>,
     log: Vec<(Tone, String)>,
-    // Options of the erase tab.
+    show_activity: bool,
+    theme: ThemePreference,
+    // Options of the erase view.
     quick_reset: bool,
     wipe_mode: WipeMode,
     filesystem: FsChoice,
@@ -106,13 +129,15 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
-        ctx.set_theme(egui::Theme::Dark);
-        ctx.all_styles_mut(|s| {
-            s.spacing.item_spacing = Vec2::new(8.0, 8.0);
-            s.spacing.button_padding = Vec2::new(12.0, 6.0);
-        });
-        Self {
-            monitor: jobs::start_monitor(ctx.clone()),
+        theme::apply(ctx);
+        // The demo build never looks at the disks of the machine it runs on.
+        #[cfg(feature = "demo")]
+        let monitor = std::sync::mpsc::channel().1;
+        #[cfg(not(feature = "demo"))]
+        let monitor = jobs::start_monitor(ctx.clone());
+        #[allow(unused_mut)]
+        let mut app = Self {
+            monitor,
             devices: vec![],
             monitor_error: None,
             selected: None,
@@ -122,6 +147,8 @@ impl App {
             jobs: HashMap::new(),
             pending: None,
             log: vec![],
+            show_activity: false,
+            theme: ThemePreference::System,
             quick_reset: false,
             wipe_mode: WipeMode::Random,
             filesystem: FsChoice::Auto,
@@ -129,7 +156,10 @@ impl App {
             label: String::new(),
             full_scan: false,
             full_capacity: false,
-        }
+        };
+        #[cfg(feature = "demo")]
+        demo::apply(&mut app, ctx);
+        app
     }
 
     fn visible(&self) -> Vec<DeviceInfo> {
@@ -154,7 +184,7 @@ impl App {
         let visible = self.visible();
         let still_there = self.selected.as_ref().is_some_and(|s| visible.iter().any(|d| &key(d) == s));
         if !still_there {
-            // With "All disks" on, still start on a device that can actually be worked on.
+            // With "All disks" on, still start on a device that can be worked on.
             let preferred = visible.iter().find(|d| d.bus.is_flash_bus() && !d.is_system);
             self.selected = preferred.or(visible.first()).map(key);
         }
@@ -186,7 +216,7 @@ impl App {
                     }
                     if !o.report_json.is_empty() {
                         state.last_report = Some(o.report_json);
-                        self.log.push((o.summary.tone, format!("{title}: {}", o.summary.title)));
+                        self.log.push((o.summary.tone, o.summary.title.clone()));
                         state.last = Some(o.summary);
                     }
                 }
@@ -212,6 +242,7 @@ impl App {
     }
 
     /// Analyzes the selected device automatically, as this is read-only.
+    #[cfg(not(feature = "demo"))]
     fn auto_analyze(&mut self, ctx: &egui::Context) {
         let Some(d) = self.selected_device() else { return };
         let k = key(&d);
@@ -233,7 +264,16 @@ impl App {
         self.jobs.insert(k, job);
     }
 
+    #[cfg(feature = "demo")]
+    fn auto_analyze(&mut self, _ctx: &egui::Context) {}
+
     fn run_health(&mut self, ctx: &egui::Context, d: DeviceInfo) {
+        #[cfg(feature = "demo")]
+        {
+            self.jobs.insert(key(&d), demo::simulate(ctx, "Health check", false));
+            return;
+        }
+        #[allow(unreachable_code)]
         let mode = if self.full_scan { ScanMode::Full } else { ScanMode::Quick };
         let job = jobs::spawn(ctx, "Health check", false, {
             let d = d.clone();
@@ -247,6 +287,13 @@ impl App {
     }
 
     fn run_backup(&mut self, ctx: &egui::Context, d: DeviceInfo, path: PathBuf) {
+        #[cfg(feature = "demo")]
+        {
+            let _ = path;
+            self.jobs.insert(key(&d), demo::simulate(ctx, "Backup", false));
+            return;
+        }
+        #[allow(unreachable_code)]
         let job = jobs::spawn(ctx, "Backup", false, {
             let d = d.clone();
             move |c| {
@@ -258,17 +305,18 @@ impl App {
     }
 
     fn run_action(&mut self, ctx: &egui::Context, action: Action, d: DeviceInfo) {
+        #[cfg(feature = "demo")]
+        {
+            self.jobs.insert(key(&d), demo::simulate(ctx, action.title(), true));
+            return;
+        }
         // Reaching this point means the user confirmed in the dialog, typing the
         // word if the device might be an external disk.
+        #[allow(unreachable_code)]
         let overrides = Overrides { allow_fixed: true };
         let target = Target::Device(d.clone());
         let device = d.clone();
-        let title = match action {
-            Action::Reset => "Factory reset",
-            Action::Wipe => "Wipe",
-            Action::CapacityTest => "Capacity test",
-            Action::Restore(_) => "Restore",
-        };
+        let title = action.title();
         let opts = ResetOptions {
             erase: if self.quick_reset { EraseChoice::Quick } else { EraseChoice::Full(self.wipe_mode) },
             filesystem: self.filesystem,
@@ -305,297 +353,500 @@ impl App {
         self.pending = Some(Pending { action, device, typed: String::new() });
     }
 
-    // ---- Panels -------------------------------------------------------------
+    // ---- Sidebar ------------------------------------------------------------
 
-    fn device_list(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(8.0);
+    fn sidebar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = palette(ui);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Devices").strong().size(15.0));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.checkbox(&mut self.show_all, "All disks");
+            w::icon_tile(ui, icon::USB, 34.0, p.accent);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(strong("USB Flash").size(15.0));
+                ui.label(RichText::new("Memory Toolset").small().color(p.muted));
             });
         });
-        if let Some(e) = &self.monitor_error {
-            ui.colored_label(BAD, e);
-        }
+
+        egui::Panel::bottom("sidebar-footer").frame(egui::Frame::new().inner_margin(Margin::symmetric(0, 8))).show(
+            ui,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.show_all, "Show all disks");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let (glyph, next, tip) = match self.theme {
+                            ThemePreference::System => {
+                                (icon::CIRCLE_HALF, ThemePreference::Light, "Theme: system. Switch to light")
+                            }
+                            ThemePreference::Light => {
+                                (icon::SUN, ThemePreference::Dark, "Theme: light. Switch to dark")
+                            }
+                            ThemePreference::Dark => {
+                                (icon::MOON, ThemePreference::System, "Theme: dark. Follow the system")
+                            }
+                        };
+                        if w::icon_button(ui, p, glyph, tip).clicked() {
+                            self.theme = next;
+                            ctx.set_theme(next);
+                        }
+                    });
+                });
+            },
+        );
+
+        ui.add_space(14.0);
         let visible = self.visible();
-        if visible.is_empty() {
-            ui.add_space(24.0);
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No USB stick found").color(MUTED));
-                ui.label(RichText::new("Plug one in; it appears here automatically.").small().color(MUTED));
-            });
+        ui.label(RichText::new(format!("DEVICES  ·  {}", visible.len())).small().color(p.muted));
+        if let Some(e) = &self.monitor_error {
+            ui.colored_label(p.bad, e);
         }
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 6.0;
             for d in visible {
-                self.device_card(ui, &d);
+                self.device_card(ui, p, &d);
             }
         });
     }
 
-    fn device_card(&mut self, ui: &mut egui::Ui, d: &DeviceInfo) {
+    fn device_card(&mut self, ui: &mut egui::Ui, p: Palette, d: &DeviceInfo) {
         let k = key(d);
         let active = self.selected.as_ref() == Some(&k);
-        let job_progress = self.jobs.get(&k).map(|j| {
-            let p = j.progress.lock().map(|p| p.clone()).unwrap_or_default();
-            (j.title.clone(), p.fraction())
+        let job = self.jobs.get(&k).map(|j| {
+            let progress = j.progress.lock().map(|x| x.clone()).unwrap_or_default();
+            (j.title.clone(), progress.fraction(), progress.total > 0)
         });
-        let response = egui::Frame::new()
-            .fill(if active { CARD_ACTIVE } else { CARD })
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(10)
-            .stroke(if active { Stroke::new(1.0, ACCENT) } else { Stroke::NONE })
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(d.display_name()).strong());
-                let size = if d.media_present { bytes(d.size_bytes) } else { "No media".to_string() };
-                let mounts = d.mount_points.join(" ");
-                ui.label(RichText::new(format!("{size}   {mounts}")).small().color(MUTED));
-                if d.is_system {
-                    ui.label(RichText::new("System disk, protected").small().color(WARN));
-                } else if !d.bus.is_flash_bus() {
-                    ui.label(RichText::new(format!("{} disk, protected", d.bus.label())).small().color(WARN));
-                } else if d.read_only {
-                    ui.label(RichText::new("Write protected").small().color(WARN));
+        let last = self.states.get(&k).and_then(|s| s.last.clone());
+        let id = egui::Id::unique(("device", &k));
+        let response = w::selectable_card(ui, p, id, active, |ui| {
+            ui.horizontal(|ui| {
+                let color = if d.is_system || !d.bus.is_flash_bus() {
+                    p.muted
+                } else if !d.media_present {
+                    p.bad
+                } else {
+                    p.accent
+                };
+                w::icon_tile(ui, device_icon(d), 36.0, color);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.add(egui::Label::new(strong(d.display_name())).truncate());
+                    let size = if d.media_present { bytes(d.size_bytes) } else { "No media".to_string() };
+                    let mounts = d.mount_points.join(" ");
+                    ui.label(RichText::new(format!("{size}   {mounts}")).small().color(p.muted));
+                });
+            });
+            if let Some((title, fraction, known)) = job {
+                ui.add_space(2.0);
+                if known {
+                    w::progress(ui, p, fraction, 5.0);
                 }
-                if let Some((title, f)) = job_progress {
-                    ui.add(egui::ProgressBar::new(f).desired_height(6.0));
-                    ui.label(RichText::new(title).small().color(ACCENT));
-                } else if let Some(Summary { tone, title, .. }) = self.states.get(&k).and_then(|s| s.last.as_ref()) {
-                    ui.label(RichText::new(title).small().color(tone_color(*tone)));
-                }
-            })
-            .response
-            .interact(egui::Sense::click());
+                ui.label(RichText::new(title).small().color(p.accent));
+            } else if d.is_system || !d.bus.is_flash_bus() {
+                let text = if d.is_system {
+                    "System disk, protected".to_string()
+                } else {
+                    "Internal disk, protected".to_string()
+                };
+                ui.label(RichText::new(format!("{}  {text}", icon::LOCK)).small().color(p.muted));
+            } else if d.read_only {
+                ui.label(RichText::new(format!("{}  Write protected", icon::LOCK)).small().color(p.warn));
+            } else if let Some(s) = last {
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("{}  {}", tone_icon(s.tone), s.title))
+                            .small()
+                            .color(tone_color(p, s.tone)),
+                    )
+                    .truncate(),
+                );
+            }
+        });
         if response.clicked() {
             self.selected = Some(k);
         }
     }
 
+    // ---- Main area ----------------------------------------------------------
+
     fn details(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let p = palette(ui);
         let Some(d) = self.selected_device() else {
-            ui.centered_and_justified(|ui| {
-                ui.label(RichText::new("Select a device").color(MUTED).size(16.0));
-            });
+            self.empty_state(ui, p);
             return;
         };
-        ui.add_space(8.0);
-        ui.label(RichText::new(d.display_name()).size(20.0).strong());
-        let serial = if d.serial.is_empty() { "unknown".to_string() } else { d.serial.clone() };
-        let size = if d.media_present { bytes(d.size_bytes) } else { "no media".to_string() };
-        ui.label(
-            RichText::new(format!("{size}  |  {}  |  Serial {serial}  |  {}", d.bus.label(), d.path)).color(MUTED),
-        );
-        ui.add_space(4.0);
+        let busy = self.jobs.contains_key(&key(&d));
+        let refused = refuse_reason(&d);
+
         ui.horizontal(|ui| {
-            for (tab, name) in [
-                (Tab::Overview, "Overview"),
-                (Tab::Health, "Health"),
-                (Tab::Erase, "Erase & Reset"),
-                (Tab::Image, "Image"),
+            w::icon_tile(ui, device_icon(&d), 52.0, if refused.is_some() { p.muted } else { p.accent });
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                ui.add(egui::Label::new(strong(d.display_name()).size(21.0)).truncate());
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing.x = 5.0;
+                    let size = if d.media_present { bytes(d.size_bytes) } else { "No media".to_string() };
+                    w::chip(ui, size, p.muted);
+                    w::chip(ui, d.bus.label(), p.muted);
+                    if !d.mount_points.is_empty() {
+                        w::chip(ui, d.mount_points.join(" "), p.muted);
+                    }
+                    if d.read_only {
+                        w::chip(ui, "Write protected", p.warn);
+                    }
+                    if !d.removable_media && d.bus.is_flash_bus() {
+                        w::chip(ui, "Fixed media", p.warn);
+                    }
+                    let serial = if d.serial.is_empty() { "No serial" } else { d.serial.as_str() };
+                    ui.label(RichText::new(serial).small().color(p.muted));
+                });
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if refused.is_none()
+                    && w::danger_button(ui, p, format!("{}  Factory reset", icon::SPARKLE), !busy).clicked()
+                {
+                    self.request(Action::Reset, d.clone());
+                }
+            });
+        });
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (tab, glyph, name) in [
+                (Tab::Overview, icon::CHART_PIE_SLICE, "Overview"),
+                (Tab::Health, icon::HEARTBEAT, "Health"),
+                (Tab::Erase, icon::ERASER, "Erase"),
+                (Tab::Image, icon::ARCHIVE, "Backup"),
             ] {
-                ui.selectable_value(&mut self.tab, tab, name);
+                let id = egui::Id::unique(("tab", name));
+                if w::nav_item(ui, p, id, self.tab == tab, glyph, name) {
+                    self.tab = tab;
+                }
             }
         });
-        ui.separator();
+        let line = ui.cursor().min.y - 8.0;
+        let width = ui.available_rect_before_wrap().x_range();
+        ui.painter().hline(width, line, egui::Stroke::new(1.0, p.border));
+        ui.add_space(6.0);
 
-        self.job_banner(ui, &d);
-        self.result_banner(ui, &d);
-
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match self.tab {
-            Tab::Overview => self.tab_overview(ui, ctx, &d),
-            Tab::Health => self.tab_health(ui, ctx, &d),
-            Tab::Erase => self.tab_erase(ui, &d),
-            Tab::Image => self.tab_image(ui, ctx, &d),
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.set_max_width(ui.available_width() - 12.0);
+            ui.add_space(2.0);
+            self.job_card(ui, p, &d);
+            self.result_card(ui, p, &d);
+            if let Some(reason) = refused.as_ref().filter(|_| d.media_present || self.tab != Tab::Overview) {
+                w::notice(
+                    ui,
+                    p.muted,
+                    icon::LOCK,
+                    "This device cannot be modified",
+                    std::slice::from_ref(reason),
+                    |_| {},
+                );
+            }
+            match self.tab {
+                Tab::Overview => self.view_overview(ui, p, ctx, &d),
+                Tab::Health => self.view_health(ui, p, ctx, &d),
+                Tab::Erase => self.view_erase(ui, p, &d),
+                Tab::Image => self.view_image(ui, p, ctx, &d),
+            }
+            ui.add_space(8.0);
         });
     }
 
-    fn job_banner(&mut self, ui: &mut egui::Ui, d: &DeviceInfo) {
+    fn empty_state(&self, ui: &mut egui::Ui, p: Palette) {
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() / 2.0 - 90.0).max(20.0));
+            w::icon_tile(ui, icon::USB, 88.0, p.accent);
+            ui.add_space(10.0);
+            ui.label(strong("Plug in a USB stick").size(20.0));
+            ui.label(
+                RichText::new("It appears here automatically. Nothing happens until you ask for it.").color(p.muted),
+            );
+        });
+    }
+
+    fn job_card(&mut self, ui: &mut egui::Ui, p: Palette, d: &DeviceInfo) {
         let Some(job) = self.jobs.get(&key(d)) else { return };
-        let p = job.progress.lock().map(|p| p.clone()).unwrap_or_default();
-        egui::Frame::new().fill(CARD).corner_radius(CornerRadius::same(6)).inner_margin(12).show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        let progress = job.progress.lock().map(|x| x.clone()).unwrap_or_default();
+        w::card(ui, p, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(&job.title).strong());
-                ui.label(RichText::new(&p.phase).color(MUTED));
+                ui.add(egui::Spinner::new().size(18.0).color(p.accent));
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(strong(&job.title));
+                    ui.label(RichText::new(&progress.phase).small().color(p.muted));
+                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Cancel").clicked() {
+                    if w::quiet_button(ui, "Cancel", true).clicked() {
                         job.cancel();
+                    }
+                    if progress.total > 0 {
+                        ui.label(strong(format!("{:.0} %", progress.fraction() * 100.0)).size(20.0));
                     }
                 });
             });
-            let text = if p.total > 0 { format!("{:.1} %", p.fraction() * 100.0) } else { String::new() };
-            ui.add(egui::ProgressBar::new(p.fraction()).text(text));
-            if p.total > 0 {
-                let eta = p.eta_secs.map(duration).unwrap_or_else(|| "--".into());
-                let mut line =
-                    format!("{} of {}  |  {}  |  {eta} left", bytes(p.done), bytes(p.total), speed(p.bytes_per_sec));
-                if p.errors > 0 {
-                    line.push_str(&format!("  |  {} failed", bytes(p.errors)));
+            if progress.total > 0 {
+                w::progress(ui, p, progress.fraction(), 8.0);
+                let eta = progress.eta_secs.map(duration).unwrap_or_else(|| "--".into());
+                let mut text = format!(
+                    "{} of {}   ·   {}   ·   {eta} left",
+                    bytes(progress.done),
+                    bytes(progress.total),
+                    speed(progress.bytes_per_sec)
+                );
+                if progress.errors > 0 {
+                    text.push_str(&format!("   ·   {} failed", bytes(progress.errors)));
                 }
-                ui.label(RichText::new(line).small().color(if p.errors > 0 { WARN } else { MUTED }));
+                ui.label(RichText::new(text).small().color(if progress.errors > 0 { p.warn } else { p.muted }));
             }
             if job.destructive {
-                ui.label(RichText::new("Do not unplug this device.").small().color(WARN));
+                ui.label(RichText::new(format!("{}  Do not unplug this device.", icon::WARNING)).small().color(p.warn));
             }
         });
     }
 
-    fn result_banner(&mut self, ui: &mut egui::Ui, d: &DeviceInfo) {
-        let Some(state) = self.states.get(&key(d)) else { return };
-        let Some(s) = &state.last else { return };
+    fn result_card(&mut self, ui: &mut egui::Ui, p: Palette, d: &DeviceInfo) {
+        let k = key(d);
+        let Some(state) = self.states.get(&k) else { return };
+        let Some(s) = state.last.clone() else { return };
         let report = state.last_report.clone();
-        let color = tone_color(s.tone);
-        egui::Frame::new()
-            .fill(color.gamma_multiply(0.15))
-            .stroke(Stroke::new(1.0, color))
-            .corner_radius(CornerRadius::same(6))
-            .inner_margin(12)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&s.title).strong().color(color));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if let Some(json) = report
-                            && ui.button("Save report").clicked()
-                        {
-                            save_report(&json, d);
-                        }
-                    });
-                });
-                for l in &s.lines {
-                    ui.label(l);
-                }
-            });
-        ui.add_space(4.0);
+        let mut dismiss = false;
+        w::notice(ui, tone_color(p, s.tone), tone_icon(s.tone), &s.title, &s.lines, |ui| {
+            if w::icon_button(ui, p, icon::X, "Dismiss").clicked() {
+                dismiss = true;
+            }
+            if let Some(json) = report
+                && ui.button(format!("{}  Save report", icon::DOWNLOAD_SIMPLE)).clicked()
+            {
+                save_report(&json, d);
+            }
+        });
+        if dismiss && let Some(state) = self.states.get_mut(&k) {
+            state.last = None;
+        }
     }
 
-    fn tab_overview(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, d: &DeviceInfo) {
+    fn view_overview(&mut self, ui: &mut egui::Ui, p: Palette, ctx: &egui::Context, d: &DeviceInfo) {
         let busy = self.jobs.contains_key(&key(d));
-        if let Some(reason) = refuse_reason(d) {
-            ui.colored_label(WARN, reason);
-        } else {
-            ui.add_space(4.0);
-            let button = egui::Button::new(RichText::new("Factory reset").size(16.0).strong().color(Color32::WHITE))
-                .fill(BAD.gamma_multiply(0.85))
-                .min_size(Vec2::new(200.0, 40.0));
-            if ui.add_enabled(!busy, button).clicked() {
-                self.request(Action::Reset, d.clone());
-            }
-            let what = if self.quick_reset {
-                "Clears the metadata (quick), then creates a fresh partition and filesystem."
-            } else {
-                "Overwrites every sector, verifies, then creates a fresh partition and filesystem."
-            };
-            ui.label(RichText::new(what).small().color(MUTED));
-            ui.add_space(8.0);
+        if !d.media_present {
+            w::notice(
+                ui,
+                p.bad,
+                icon::WARNING_CIRCLE,
+                "No media detected",
+                &["The controller answers but reports no flash. This is the typical failure of a dead stick."
+                    .to_string()],
+                |_| {},
+            );
+            return;
         }
-
         let state = self.states.get(&key(d));
-        if let Some(e) = state.and_then(|s| s.analysis_error.as_ref()) {
-            ui.colored_label(BAD, format!("Analysis failed: {e}"));
-            if ui.add_enabled(!busy, egui::Button::new("Analyze again")).clicked() {
+        if let Some(e) = state.and_then(|s| s.analysis_error.clone()) {
+            let mut retry = false;
+            w::notice(ui, p.bad, icon::WARNING_CIRCLE, "Analysis failed", &[e], |ui| {
+                retry = ui.add_enabled(!busy, egui::Button::new("Try again")).clicked();
+            });
+            if retry {
                 if let Some(s) = self.states.get_mut(&key(d)) {
                     s.analysis_requested = false;
+                    s.analysis_error = None;
                 }
                 ctx.request_repaint();
             }
             return;
         }
-        if !d.media_present {
-            ui.colored_label(
-                BAD,
-                "The device reports no media or zero capacity. This is the typical failure of a dead stick.",
-            );
-            return;
-        }
         let Some(a) = state.and_then(|s| s.analysis.as_ref()) else {
-            ui.label(RichText::new("Analyzing...").color(MUTED));
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().color(p.accent));
+                ui.label(RichText::new("Analyzing...").color(p.muted));
+            });
             return;
         };
 
-        section(ui, "Content");
-        let color = match a.content {
-            ContentKind::Blank => GOOD,
-            ContentKind::RandomOrEncrypted => ACCENT,
-            ContentKind::Data => WARN,
-            ContentKind::Unreadable => BAD,
-        };
-        ui.label(RichText::new(a.content.label()).color(color).strong());
-        content_bar(ui, a);
+        ui.columns(3, |c| {
+            let content = match a.content {
+                ContentKind::Blank => p.good,
+                ContentKind::RandomOrEncrypted => p.accent,
+                ContentKind::Data => p.warn,
+                ContentKind::Unreadable => p.bad,
+            };
+            w::stat(&mut c[0], p, icon::FILES, "Content", a.content.label(), content);
+            w::stat(&mut c[1], p, icon::STACK, "Filesystem", &a.fs_summary(), p.text);
+            w::stat(&mut c[2], p, icon::TABLE, "Partition table", a.table_kind.label(), p.text);
+        });
 
-        section(ui, "Layout");
-        ui.label(format!("Partition table: {}", a.table_kind.label()));
-        if let Some(f) = &a.whole_device_fs {
-            ui.label(format!("Filesystem on the whole device: {}{}", f.name, label_suffix(&f.label)));
-        }
-        if !a.partitions.is_empty() {
-            egui::Grid::new("partitions").striped(true).num_columns(5).spacing([16.0, 6.0]).show(ui, |ui| {
-                for h in ["#", "Size", "Filesystem", "Label", "Partition type"] {
-                    ui.label(RichText::new(h).small().color(MUTED));
-                }
-                ui.end_row();
-                for p in &a.partitions {
-                    ui.label(p.partition.index.to_string());
-                    ui.label(bytes(p.partition.size));
-                    match &p.filesystem {
-                        Some(f) => {
-                            let suffix = if f.encrypted { " (encrypted)" } else { "" };
-                            ui.label(format!("{}{suffix}", f.name));
-                            ui.label(&f.label);
+        w::card(ui, p, |ui| {
+            w::section(ui, p, "Layout", "");
+            let colors = [p.accent, p.good, p.warn, p.bad];
+            let mut segments = vec![];
+            let mut position = 0u64;
+            let mut sorted: Vec<_> = a.partitions.iter().collect();
+            sorted.sort_by_key(|x| x.partition.start);
+            for (i, part) in sorted.iter().enumerate() {
+                let gap = part.partition.start.saturating_sub(position);
+                segments.push((gap as f64, p.surface_hover));
+                segments.push((part.partition.size as f64, colors[i % colors.len()]));
+                position = part.partition.start + part.partition.size;
+            }
+            if a.partitions.is_empty() {
+                let color = if a.whole_device_fs.is_some() { p.accent } else { p.surface_hover };
+                segments.push((a.size_bytes as f64, color));
+            } else {
+                segments.push((a.size_bytes.saturating_sub(position) as f64, p.surface_hover));
+            }
+            w::segment_bar(ui, p, 18.0, &segments);
+
+            if let Some(f) = &a.whole_device_fs {
+                ui.label(format!("{} on the whole device{}", f.name, label_suffix(&f.label)));
+            }
+            if sorted.is_empty() && a.whole_device_fs.is_none() {
+                ui.label(RichText::new("No partitions and no filesystem found.").color(p.muted));
+            }
+            for (i, part) in sorted.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(12.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, CornerRadius::same(3), colors[i % colors.len()]);
+                    let name = part.filesystem.as_ref().map_or("Unknown filesystem", |f| f.name.as_str());
+                    ui.label(strong(name));
+                    if let Some(f) = &part.filesystem {
+                        if f.encrypted {
+                            w::chip(ui, format!("{} Encrypted", icon::LOCK), p.accent);
                         }
-                        None => {
-                            ui.label(RichText::new("unknown").color(WARN));
-                            ui.label("");
+                        if !f.label.is_empty() {
+                            ui.label(RichText::new(&f.label).color(p.muted));
                         }
                     }
-                    ui.label(&p.partition.type_name);
-                    ui.end_row();
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(bytes(part.partition.size));
+                        ui.label(RichText::new(&part.partition.type_name).small().color(p.muted));
+                    });
+                });
+            }
+        });
+
+        w::card(ui, p, |ui| {
+            w::section(ui, p, "What is on it", "");
+            let s = &a.stats;
+            let blank = if p.dark { Color32::from_gray(90) } else { Color32::from_gray(190) };
+            w::segment_bar(
+                ui,
+                p,
+                10.0,
+                &[
+                    (s.data as f64, p.warn),
+                    (s.high_entropy as f64, p.accent),
+                    (s.blank as f64, blank),
+                    (s.unreadable as f64, p.bad),
+                ],
+            );
+            ui.horizontal_wrapped(|ui| {
+                w::legend(ui, p, p.warn, &format!("{} data", s.data));
+                w::legend(ui, p, p.accent, &format!("{} random or encrypted", s.high_entropy));
+                w::legend(ui, p, blank, &format!("{} blank", s.blank));
+                w::legend(ui, p, p.bad, &format!("{} unreadable", s.unreadable));
+            });
+            ui.label(
+                RichText::new(format!("Spot check of {} areas spread over the device.", s.samples))
+                    .small()
+                    .color(p.muted),
+            );
+        });
+
+        if !a.findings.is_empty() {
+            w::card(ui, p, |ui| {
+                w::section(ui, p, "Findings", "");
+                for f in &a.findings {
+                    ui.horizontal_top(|ui| {
+                        ui.label(RichText::new(icon::INFO).color(p.muted));
+                        ui.add(egui::Label::new(f.as_str()).wrap());
+                    });
                 }
             });
         }
-        if !d.mount_points.is_empty() {
-            ui.label(format!("Mounted at: {}", d.mount_points.join(", ")));
-        }
-
-        if !a.findings.is_empty() {
-            section(ui, "Findings");
-            for f in &a.findings {
-                ui.label(format!("- {f}"));
-            }
-        }
     }
 
-    fn tab_health(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, d: &DeviceInfo) {
+    fn view_health(&mut self, ui: &mut egui::Ui, p: Palette, ctx: &egui::Context, d: &DeviceInfo) {
         let busy = self.jobs.contains_key(&key(d));
-        section(ui, "Read test (safe, changes nothing)");
-        ui.checkbox(&mut self.full_scan, "Read every sector instead of samples (slow)");
-        if ui.add_enabled(!busy, egui::Button::new("Run health check")).clicked() {
-            self.run_health(ctx, d.clone());
-        }
+        let health = self.states.get(&key(d)).and_then(|s| s.health.clone());
 
-        if let Some(h) = self.states.get(&key(d)).and_then(|s| s.health.clone()) {
-            if let Some(s) = &h.scan {
-                ui.add_space(8.0);
-                ui.label(format!(
-                    "Read {} at avg {}, min {}, max {}",
-                    bytes(s.bytes_read),
-                    speed(s.avg_bytes_per_sec),
-                    speed(s.min_bytes_per_sec),
-                    speed(s.max_bytes_per_sec)
-                ));
-                speed_plot(ui, &s.speed_profile);
-                if !s.unreadable.is_empty() {
-                    ui.colored_label(
-                        BAD,
-                        format!("Unreadable: {} in {} area(s)", bytes(s.unreadable.total()), s.unreadable.ranges.len()),
-                    );
+        w::card(ui, p, |ui| {
+            match &health {
+                Some(h) => {
+                    let (color, glyph) = match h.verdict {
+                        Verdict::Good => (p.good, icon::CHECK_CIRCLE),
+                        Verdict::Warning => (p.warn, icon::WARNING),
+                        Verdict::Failing => (p.bad, icon::WARNING_CIRCLE),
+                        Verdict::Dead => (p.bad, icon::X_CIRCLE),
+                    };
+                    ui.horizontal_top(|ui| {
+                        w::icon_tile(ui, glyph, 52.0, color);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 3.0;
+                            ui.label(strong(h.verdict.label()).size(21.0).color(color));
+                            for r in &h.reasons {
+                                ui.add(egui::Label::new(r.as_str()).wrap());
+                            }
+                        });
+                    });
+                }
+                None => {
+                    w::section(ui, p, "Read test", "Reads the device and measures errors and speed. Changes nothing.")
                 }
             }
-            match &h.smart {
-                Some(usbflash_core::smart::SmartOutcome::Available { attributes }) => {
-                    section(ui, "SMART");
-                    egui::Grid::new("smart").striped(true).num_columns(3).show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                let text = if health.is_some() { "Run again" } else { "Run health check" };
+                if w::primary_button(ui, p, format!("{}  {text}", icon::HEARTBEAT), !busy && d.media_present).clicked()
+                {
+                    self.run_health(ctx, d.clone());
+                }
+                ui.checkbox(&mut self.full_scan, "Read every sector (slow)");
+            });
+        });
+
+        if let Some(h) = &health {
+            if let Some(s) = &h.scan {
+                ui.columns(3, |c| {
+                    w::stat(&mut c[0], p, icon::GAUGE, "Average read", &speed(s.avg_bytes_per_sec), p.text);
+                    w::stat(&mut c[1], p, icon::ARROW_DOWN, "Slowest", &speed(s.min_bytes_per_sec), p.text);
+                    let (text, color) = if s.unreadable.is_empty() {
+                        ("None".to_string(), p.good)
+                    } else {
+                        (bytes(s.unreadable.total()), p.bad)
+                    };
+                    w::stat(&mut c[2], p, icon::WARNING, "Unreadable", &text, color);
+                });
+                w::card(ui, p, |ui| {
+                    w::section(ui, p, "Speed across the device", "");
+                    w::profile_chart(ui, p, &s.speed_profile, 90.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("Start").small().color(p.muted));
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(RichText::new("End").small().color(p.muted));
+                            ui.centered_and_justified(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Peak {}, {} read",
+                                        speed(s.max_bytes_per_sec),
+                                        bytes(s.bytes_read)
+                                    ))
+                                    .small()
+                                    .color(p.muted),
+                                );
+                            });
+                        });
+                    });
+                });
+            }
+            if let Some(SmartOutcome::Available { attributes }) = &h.smart {
+                w::card(ui, p, |ui| {
+                    w::section(ui, p, "SMART", "");
+                    egui::Grid::new("smart").striped(true).num_columns(3).spacing([24.0, 6.0]).show(ui, |ui| {
+                        for x in ["Attribute", "Value", "Raw"] {
+                            ui.label(RichText::new(x).small().color(p.muted));
+                        }
+                        ui.end_row();
                         for a in attributes {
                             ui.label(a.name);
                             ui.label(a.current.to_string());
@@ -603,175 +854,261 @@ impl App {
                             ui.end_row();
                         }
                     });
-                }
-                Some(usbflash_core::smart::SmartOutcome::Unavailable { reason }) => {
-                    ui.label(RichText::new(format!("SMART not available: {reason}")).small().color(MUTED));
-                }
-                None => {}
+                });
             }
             for n in &h.notes {
-                ui.label(RichText::new(n).small().color(MUTED));
+                ui.label(RichText::new(n).small().color(p.muted));
             }
         }
 
-        section(ui, "Capacity test (destroys all data)");
-        ui.label("Writes a pattern and reads it back to find bad flash and fake capacity.");
-        ui.checkbox(&mut self.full_capacity, "Test every sector instead of probes (slow, but authoritative)");
-        let allowed = refuse_reason(d).is_none();
-        if ui.add_enabled(!busy && allowed, egui::Button::new("Run capacity test")).clicked() {
-            self.request(Action::CapacityTest, d.clone());
-        }
-    }
-
-    fn tab_erase(&mut self, ui: &mut egui::Ui, d: &DeviceInfo) {
-        let busy = self.jobs.contains_key(&key(d));
-        let allowed = refuse_reason(d).is_none();
-        if let Some(reason) = refuse_reason(d) {
-            ui.colored_label(WARN, reason);
-        }
-
-        section(ui, "Erase pattern");
-        for mode in [WipeMode::Random, WipeMode::Zero, WipeMode::RandomThenZero] {
-            ui.radio_value(&mut self.wipe_mode, mode, mode.label());
-        }
-        ui.label(
-            RichText::new(
-                "One pass is enough on flash; more passes only add wear. Spare blocks of the controller cannot \
-                 be reached by any software, so destroy sticks with highly sensitive data physically.",
-            )
-            .small()
-            .color(MUTED),
-        );
-
-        section(ui, "Wipe");
-        if ui.add_enabled(!busy && allowed, egui::Button::new("Wipe device")).clicked() {
-            self.request(Action::Wipe, d.clone());
-        }
-
-        section(ui, "Factory reset");
-        ui.checkbox(&mut self.quick_reset, "Quick: only clear metadata. Old data stays recoverable!");
-        egui::Grid::new("reset-options").num_columns(2).show(ui, |ui| {
-            ui.label("Filesystem");
-            egui::ComboBox::from_id_salt("fs")
-                .selected_text(match self.filesystem {
-                    FsChoice::Auto => "Automatic (FAT up to 32 GiB, else exFAT)",
-                    FsChoice::Fat => "FAT32 / FAT16",
-                    FsChoice::Exfat => "exFAT",
-                    FsChoice::None => "None (blank device)",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(
-                        &mut self.filesystem,
-                        FsChoice::Auto,
-                        "Automatic (FAT up to 32 GiB, else exFAT)",
-                    );
-                    ui.selectable_value(&mut self.filesystem, FsChoice::Fat, "FAT32 / FAT16");
-                    ui.selectable_value(&mut self.filesystem, FsChoice::Exfat, "exFAT");
-                    ui.selectable_value(&mut self.filesystem, FsChoice::None, "None (blank device)");
-                });
-            ui.end_row();
-            ui.label("Partition table");
-            egui::ComboBox::from_id_salt("table")
-                .selected_text(match self.table {
-                    TableChoice::Auto => "Automatic (MBR, GPT above 2 TiB)",
-                    TableChoice::Mbr => "MBR",
-                    TableChoice::Gpt => "GPT",
-                    TableChoice::None => "None",
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.table, TableChoice::Auto, "Automatic (MBR, GPT above 2 TiB)");
-                    ui.selectable_value(&mut self.table, TableChoice::Mbr, "MBR");
-                    ui.selectable_value(&mut self.table, TableChoice::Gpt, "GPT");
-                    ui.selectable_value(&mut self.table, TableChoice::None, "None");
-                });
-            ui.end_row();
-            ui.label("Label");
-            ui.add(egui::TextEdit::singleline(&mut self.label).desired_width(160.0).hint_text("optional"));
-            ui.end_row();
+        w::card(ui, p, |ui| {
+            w::section(
+                ui,
+                p,
+                "Capacity test",
+                "Writes a pattern and reads it back, to find bad flash and sticks that lie about their size. \
+                 Destroys all data.",
+            );
+            ui.horizontal(|ui| {
+                let allowed = refuse_reason(d).is_none();
+                if w::quiet_button(ui, format!("{}  Run capacity test", icon::RULER), !busy && allowed).clicked() {
+                    self.request(Action::CapacityTest, d.clone());
+                }
+                ui.checkbox(&mut self.full_capacity, "Test every sector (slow, but authoritative)");
+            });
         });
-        if ui.add_enabled(!busy && allowed, egui::Button::new("Factory reset")).clicked() {
-            self.request(Action::Reset, d.clone());
-        }
     }
 
-    fn tab_image(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, d: &DeviceInfo) {
+    fn view_erase(&mut self, ui: &mut egui::Ui, p: Palette, d: &DeviceInfo) {
         let busy = self.jobs.contains_key(&key(d));
-        section(ui, "Back up to an image file");
-        ui.label("Saves the whole device, including unknown filesystems. Read errors are tolerated and listed.");
-        if ui.add_enabled(!busy && d.media_present, egui::Button::new("Back up...")).clicked() {
-            let name = format!("{}.img", d.display_name().replace(' ', "_"));
-            if let Some(path) =
-                rfd::FileDialog::new().set_file_name(name).add_filter("Disk image", &["img"]).save_file()
-            {
-                self.run_backup(ctx, d.clone(), path);
+        if refuse_reason(d).is_some() {
+            return;
+        }
+
+        w::card(ui, p, |ui| {
+            w::section(ui, p, "How to erase", "");
+            for (mode, description) in [
+                (WipeMode::Random, "Recommended. Leaves random data, which reveals nothing."),
+                (WipeMode::Zero, "Faster on some sticks. The device reads as blank afterwards."),
+                (WipeMode::RandomThenZero, "Takes twice as long, and adds wear to the flash."),
+            ] {
+                let id = egui::Id::unique(("wipe-mode", mode.label()));
+                if w::option_row(ui, p, id, self.wipe_mode == mode, mode.label(), description) {
+                    self.wipe_mode = mode;
+                }
             }
-        }
-        section(ui, "Restore an image file (destroys all data)");
-        let allowed = refuse_reason(d).is_none();
-        if ui.add_enabled(!busy && allowed, egui::Button::new("Restore...")).clicked()
-            && let Some(path) = rfd::FileDialog::new().add_filter("Disk image", &["img", "iso", "bin"]).pick_file()
-        {
-            self.request(Action::Restore(path), d.clone());
-        }
+            ui.label(
+                RichText::new(
+                    "One pass is enough on flash. No software reaches the controller's spare blocks, so physically \
+                     destroy sticks that held highly sensitive data.",
+                )
+                .small()
+                .color(p.muted),
+            );
+        });
+
+        w::card(ui, p, |ui| {
+            w::section(ui, p, "Factory reset", "Erases the device, then creates a fresh partition and filesystem.");
+            egui::Grid::new("reset-options").num_columns(2).spacing([16.0, 8.0]).show(ui, |ui| {
+                ui.label(RichText::new("Filesystem").color(p.muted));
+                egui::ComboBox::from_id_salt("fs").width(280.0).selected_text(fs_label(self.filesystem)).show_ui(
+                    ui,
+                    |ui| {
+                        for c in [FsChoice::Auto, FsChoice::Fat, FsChoice::Exfat, FsChoice::None] {
+                            ui.selectable_value(&mut self.filesystem, c, fs_label(c));
+                        }
+                    },
+                );
+                ui.end_row();
+                ui.label(RichText::new("Partition table").color(p.muted));
+                egui::ComboBox::from_id_salt("table").width(280.0).selected_text(table_label(self.table)).show_ui(
+                    ui,
+                    |ui| {
+                        for c in [TableChoice::Auto, TableChoice::Mbr, TableChoice::Gpt, TableChoice::None] {
+                            ui.selectable_value(&mut self.table, c, table_label(c));
+                        }
+                    },
+                );
+                ui.end_row();
+                ui.label(RichText::new("Label").color(p.muted));
+                ui.add(egui::TextEdit::singleline(&mut self.label).desired_width(280.0).hint_text("Optional"));
+                ui.end_row();
+            });
+            ui.checkbox(&mut self.quick_reset, "Quick: only clear the metadata");
+            if self.quick_reset {
+                ui.label(
+                    RichText::new(format!(
+                        "{}  Old data stays recoverable. Not for sticks with private data.",
+                        icon::WARNING
+                    ))
+                    .small()
+                    .color(p.warn),
+                );
+            }
+            ui.horizontal(|ui| {
+                if w::danger_button(ui, p, format!("{}  Factory reset", icon::SPARKLE), !busy).clicked() {
+                    self.request(Action::Reset, d.clone());
+                }
+                if w::quiet_button(ui, format!("{}  Only wipe", icon::ERASER), !busy).clicked() {
+                    self.request(Action::Wipe, d.clone());
+                }
+            });
+        });
+    }
+
+    fn view_image(&mut self, ui: &mut egui::Ui, p: Palette, ctx: &egui::Context, d: &DeviceInfo) {
+        let busy = self.jobs.contains_key(&key(d));
+        w::card(ui, p, |ui| {
+            w::section(
+                ui,
+                p,
+                "Back up to an image file",
+                "Saves the whole device, including filesystems Windows cannot read. Read errors are tolerated and listed.",
+            );
+            let label = format!("{}  Back up...", icon::DOWNLOAD_SIMPLE);
+            if w::primary_button(ui, p, label, !busy && d.media_present).clicked() {
+                let name = format!("{}.img", d.display_name().replace(' ', "_"));
+                if let Some(path) =
+                    rfd::FileDialog::new().set_file_name(name).add_filter("Disk image", &["img"]).save_file()
+                {
+                    self.run_backup(ctx, d.clone(), path);
+                }
+            }
+        });
+        w::card(ui, p, |ui| {
+            w::section(
+                ui,
+                p,
+                "Restore an image file",
+                "Writes an image to this device and verifies it. Destroys all data.",
+            );
+            let allowed = refuse_reason(d).is_none();
+            if w::quiet_button(ui, format!("{}  Restore...", icon::UPLOAD_SIMPLE), !busy && allowed).clicked()
+                && let Some(path) = rfd::FileDialog::new().add_filter("Disk image", &["img", "iso", "bin"]).pick_file()
+            {
+                self.request(Action::Restore(path), d.clone());
+            }
+        });
     }
 
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut p) = self.pending.take() else { return };
+        let Some(mut pending) = self.pending.take() else { return };
         let mut decision = None;
-        let word_needed = guard::required_confirmation(&p.device) == Confirmation::Typed;
-        egui::Modal::new(egui::Id::unique("confirm")).show(ctx, |ui| {
-            ui.set_width(460.0);
-            ui.label(RichText::new(p.action.description()).size(17.0).strong());
-            ui.add_space(4.0);
-            egui::Frame::new().fill(CARD).corner_radius(CornerRadius::same(6)).inner_margin(10).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(p.device.display_name()).strong());
-                ui.label(format!("Size: {}", bytes(p.device.size_bytes)));
-                let serial = if p.device.serial.is_empty() { "unknown" } else { &p.device.serial };
-                ui.label(format!("Serial: {serial}"));
-                ui.label(format!("Connection: {}, {}", p.device.bus.label(), p.device.path));
-                if !p.device.mount_points.is_empty() {
-                    ui.label(format!("Currently mounted at: {}", p.device.mount_points.join(", ")));
-                }
+        let word_needed = guard::required_confirmation(&pending.device) == Confirmation::Typed;
+        egui::Modal::new(egui::Id::unique("confirm")).frame(modal_frame(ctx)).show(ctx, |ui| {
+            let p = palette(ui);
+            ui.set_width(440.0);
+            ui.horizontal(|ui| {
+                w::icon_tile(ui, icon::WARNING, 42.0, p.bad);
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    ui.label(strong(pending.action.description()).size(17.0));
+                    ui.label(RichText::new("All data on this device will be lost.").color(p.bad));
+                });
             });
-            ui.colored_label(BAD, "All data on this device will be lost. This cannot be undone.");
+            ui.add_space(4.0);
+            let d = &pending.device;
+            egui::Frame::new().fill(p.surface_hover).corner_radius(10).inner_margin(12).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(strong(d.display_name()));
+                ui.spacing_mut().interact_size.y = 18.0;
+                egui::Grid::new("confirm-device").num_columns(2).spacing([14.0, 3.0]).show(ui, |ui| {
+                    let mounts = d.mount_points.join(", ");
+                    let serial = if d.serial.is_empty() { "unknown" } else { d.serial.as_str() };
+                    let rows = [
+                        ("Size", bytes(d.size_bytes)),
+                        ("Serial", serial.to_string()),
+                        ("Connection", format!("{}, {}", d.bus.label(), d.path)),
+                        ("Mounted at", if mounts.is_empty() { "not mounted".to_string() } else { mounts }),
+                    ];
+                    for (k, v) in rows {
+                        ui.label(RichText::new(k).small().color(p.muted));
+                        ui.label(RichText::new(v).small());
+                        ui.end_row();
+                    }
+                });
+            });
             if word_needed {
-                ui.colored_label(
-                    WARN,
-                    "This device reports fixed media or is unusually large. It may be an external disk rather \
-                     than a flash stick. Type ERASE to confirm.",
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(
+                            "This device reports fixed media or is unusually large. It may be an external disk \
+                             rather than a flash stick. Type ERASE to confirm.",
+                        )
+                        .color(p.warn),
+                    )
+                    .wrap(),
                 );
-                ui.text_edit_singleline(&mut p.typed);
+                ui.add(egui::TextEdit::singleline(&mut pending.typed).desired_width(f32::INFINITY).hint_text("ERASE"));
             }
             ui.add_space(4.0);
-            let confirmed = !word_needed || p.typed == "ERASE";
-            ui.horizontal(|ui| {
-                if ui.button("Cancel").clicked() {
-                    decision = Some(false);
-                }
-                let go = egui::Button::new(RichText::new("Erase and continue").color(Color32::WHITE)).fill(BAD);
-                if ui.add_enabled(confirmed, go).clicked() {
+            let confirmed = !word_needed || pending.typed == "ERASE";
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if w::danger_button(ui, p, "Erase and continue", confirmed).clicked() {
                     decision = Some(true);
+                }
+                if w::quiet_button(ui, "Cancel", true).clicked() {
+                    decision = Some(false);
                 }
             });
         });
         match decision {
-            Some(true) => self.run_action(ctx, p.action, p.device),
+            Some(true) => self.run_action(ctx, pending.action, pending.device),
             Some(false) => {}
-            None => self.pending = Some(p),
+            None => self.pending = Some(pending),
         }
     }
 
-    fn log_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
-            if self.log.is_empty() {
-                ui.label(RichText::new("Nothing done yet in this session.").small().color(MUTED));
+    fn activity(&mut self, ui: &mut egui::Ui) {
+        let p = palette(ui);
+        ui.horizontal(|ui| {
+            let caret = if self.show_activity { icon::CARET_DOWN } else { icon::CARET_UP };
+            if w::icon_button(ui, p, caret, "Show activity").clicked() {
+                self.show_activity = !self.show_activity;
             }
-            for (tone, line) in &self.log {
-                ui.label(RichText::new(line).small().color(tone_color(*tone)));
+            match self.log.last() {
+                Some((tone, line)) => {
+                    ui.add(egui::Label::new(RichText::new(line).small().color(tone_color(p, *tone))).truncate());
+                }
+                None => {
+                    ui.label(RichText::new("No activity yet").small().color(p.muted));
+                }
             }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(format!("v{VERSION}  ·  GPL-3.0-or-later")).small().color(p.muted));
+            });
         });
+        if self.show_activity {
+            egui::ScrollArea::vertical().max_height(110.0).stick_to_bottom(true).auto_shrink([false, true]).show(
+                ui,
+                |ui| {
+                    ui.spacing_mut().item_spacing.y = 3.0;
+                    for (tone, line) in &self.log {
+                        ui.label(
+                            RichText::new(format!("{}  {line}", tone_icon(*tone))).small().color(tone_color(p, *tone)),
+                        );
+                    }
+                },
+            );
+        }
+    }
+}
+
+fn fs_label(c: FsChoice) -> &'static str {
+    match c {
+        FsChoice::Auto => "Automatic (FAT up to 32 GiB, else exFAT)",
+        FsChoice::Fat => "FAT32 / FAT16",
+        FsChoice::Exfat => "exFAT",
+        FsChoice::None => "None (blank device)",
+    }
+}
+
+fn table_label(c: TableChoice) -> &'static str {
+    match c {
+        TableChoice::Auto => "Automatic (MBR, GPT above 2 TiB)",
+        TableChoice::Mbr => "MBR",
+        TableChoice::Gpt => "GPT",
+        TableChoice::None => "None",
     }
 }
 
@@ -779,69 +1116,17 @@ fn refuse_reason(d: &DeviceInfo) -> Option<String> {
     // Fixed media can be confirmed in the dialog, so it does not block the buttons.
     match guard::check_destructive(d, Overrides { allow_fixed: true }) {
         Ok(()) => d.read_only.then(|| {
-            "This device is write protected. Without a lock switch, this usually means the controller locked \
-             the flash permanently."
+            "It is write protected. Without a lock switch, this usually means the controller locked the flash \
+             permanently."
                 .to_string()
         }),
+        Err(Error::Refused(reason)) => Some(reason),
         Err(e) => Some(e.to_string()),
     }
 }
 
 fn label_suffix(label: &str) -> String {
     if label.is_empty() { String::new() } else { format!(", label {label}") }
-}
-
-fn section(ui: &mut egui::Ui, title: &str) {
-    ui.add_space(10.0);
-    ui.label(RichText::new(title).strong().size(14.0));
-}
-
-fn content_bar(ui: &mut egui::Ui, a: &Analysis) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(520.0), 10.0), egui::Sense::hover());
-    let total = a.stats.samples.max(1) as f32;
-    let mut x = rect.left();
-    for (n, color) in [
-        (a.stats.data, WARN),
-        (a.stats.high_entropy, ACCENT),
-        (a.stats.blank, Color32::from_gray(70)),
-        (a.stats.unreadable, BAD),
-    ] {
-        let w = rect.width() * n as f32 / total;
-        let r = egui::Rect::from_min_size(egui::pos2(x, rect.top()), Vec2::new(w, rect.height()));
-        ui.painter().rect_filled(r, CornerRadius::ZERO, color);
-        x += w;
-    }
-    ui.label(
-        RichText::new(format!(
-            "Spot check of {} areas: {} data, {} random-looking, {} blank, {} unreadable",
-            a.stats.samples, a.stats.data, a.stats.high_entropy, a.stats.blank, a.stats.unreadable
-        ))
-        .small()
-        .color(MUTED),
-    );
-}
-
-fn speed_plot(ui: &mut egui::Ui, profile: &[f32]) {
-    let max = profile.iter().copied().fold(0.0, f32::max);
-    if max <= 0.0 {
-        return;
-    }
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(520.0), 70.0), egui::Sense::hover());
-    let painter = ui.painter();
-    painter.rect_filled(rect, CornerRadius::same(4), CARD);
-    let w = rect.width() / profile.len() as f32;
-    for (i, &v) in profile.iter().enumerate() {
-        if v <= 0.0 {
-            continue;
-        }
-        let h = rect.height() * (v / max);
-        let r = egui::Rect::from_min_size(
-            egui::pos2(rect.left() + i as f32 * w, rect.bottom() - h),
-            Vec2::new((w - 1.0).max(1.0), h),
-        );
-        painter.rect_filled(r, CornerRadius::ZERO, ACCENT);
-    }
-    ui.label(RichText::new(format!("Read speed across the device. Peak: {}", speed(max as f64))).small().color(MUTED));
 }
 
 fn save_report(json: &str, d: &DeviceInfo) {
@@ -863,23 +1148,25 @@ impl eframe::App for App {
         self.poll_monitor();
         self.poll_jobs();
         self.auto_analyze(&ctx);
+        let p = palette(ui);
 
-        egui::Panel::bottom("status").resizable(true).default_size(90.0).show(ui, |ui| {
-            ui.add_space(2.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Activity").small().strong());
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(format!("v{VERSION}  |  GPL-3.0-or-later")).small().color(MUTED));
-                });
-            });
-            self.log_panel(ui);
-        });
-        egui::Panel::left("devices").resizable(true).default_size(290.0).show(ui, |ui| {
-            self.device_list(ui);
-        });
-        egui::CentralPanel::default().show(ui, |ui| {
-            self.details(ui, &ctx);
-        });
+        egui::Panel::left("devices")
+            .resizable(true)
+            .default_size(290.0)
+            .size_range(240.0..=420.0)
+            .frame(egui::Frame::new().fill(p.sidebar).inner_margin(14))
+            .show(ui, |ui| self.sidebar(ui, &ctx));
+        egui::Panel::bottom("activity")
+            .frame(egui::Frame::new().fill(p.background).inner_margin(Margin::symmetric(14, 4)))
+            .show(ui, |ui| self.activity(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(p.background).inner_margin(Margin {
+                left: 22,
+                right: 22,
+                top: 18,
+                bottom: 4,
+            }))
+            .show(ui, |ui| self.details(ui, &ctx));
         self.confirm_dialog(&ctx);
 
         // Keeps the speed and ETA figures moving even between progress events.
@@ -887,4 +1174,8 @@ impl eframe::App for App {
             ctx.request_repaint_after(std::time::Duration::from_millis(250));
         }
     }
+}
+
+fn modal_frame(ctx: &egui::Context) -> egui::Frame {
+    egui::Frame::window(&ctx.global_style()).inner_margin(22)
 }

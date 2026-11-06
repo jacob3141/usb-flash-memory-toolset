@@ -20,6 +20,11 @@ test = false
 usbflash-core.workspace = true
 eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 rfd = "0.17"
+egui-pop-phosphor = "0.15"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
+
+[features]
+# Shows made-up devices and simulated jobs. Such a build cannot touch any disk.
+demo = []

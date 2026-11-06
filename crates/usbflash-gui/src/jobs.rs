@@ -7,14 +7,19 @@ use eframe::egui;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex};
+#[cfg(not(feature = "demo"))]
 use std::time::Duration;
 use usbflash_core::analyze::Analysis;
 use usbflash_core::health::HealthReport;
-use usbflash_core::{CancelFlag, Ctx, DeviceInfo, Progress, Result, ops};
+use usbflash_core::{CancelFlag, Ctx, Progress, Result};
+#[cfg(not(feature = "demo"))]
+use usbflash_core::{DeviceInfo, ops};
 
+#[cfg(not(feature = "demo"))]
 const MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Reports the device list whenever it changes. Handles plugging and unplugging.
+#[cfg(not(feature = "demo"))]
 pub fn start_monitor(ctx: egui::Context) -> Receiver<std::result::Result<Vec<DeviceInfo>, String>> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
