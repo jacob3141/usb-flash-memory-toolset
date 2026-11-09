@@ -1,3 +1,5 @@
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/jacob3141)
+
 <p align="center"><img src="assets/logo-128.png" alt="" width="96"></p>
 
 # USB Flash Memory Toolset
